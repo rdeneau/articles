@@ -12,33 +12,44 @@ This article is a case study to complement the [F# Computation Expressions serie
 
 Consider an error-message *humanization* pipeline: given a raw error message and a partner identifier, it tries to turn a technical string into something a user can read. The pipeline has four steps, and any step can produce a definitive outcome and stop:
 
-1. **No message** — nothing to humanize.
-2. **Unknown partner** — no rules exist for this partner; leave the message as-is.
-3. **Already user-friendly** — the partner sends readable messages; keep them unchanged.
-4. **Apply rules** — try to match the message against known patterns; a rule either fires or nothing matched.
+1. **No message** (`NoMessage`) — nothing to humanize.
+2. **Unknown partner** (`PartnerNotSupported`) — no rules exist for this partner; leave the message as-is.
+3. **Already user-friendly** (`AlreadyUserFriendly`) — the partner sends readable messages; keep them unchanged.
+4. **Apply rules** — try to match the message against known patterns; a rule either fires (`Humanized`) or nothing matched (`NotHumanized`).
+
+Each outcome is a case of a dedicated discriminated union:
+
+```fsharp
+type HumanizationOutcome =
+    | NoMessage                                 // nothing to humanize
+    | PartnerNotSupported                       // no rules exist for this partner
+    | AlreadyUserFriendly                       // the partner already sends readable messages
+    | NotHumanized of originalMessage: string   // no rule matched; original kept
+    | Humanized of humanizedMessage: string     // a rule produced a readable message
+```
 
 Written as nested `match` expressions, the function looks like this:
 
 ```fsharp
-let humanizeWithOutcome (message: Message option) (groupId: GroupId) : HumanizationOutcome<Message option> =
-    match message with                                                                   // Step 1️⃣
+let humanizeWithOutcome (optionalMessage: string option) (groupId: GroupId) : HumanizationOutcome =
+    match optionalMessage with                                                                  // Step 1️⃣
     | None ->
-        { Result = None; Status = HumanizationStatus.NoMessage }
+        HumanizationOutcome.NoMessage
     | Some message ->
-        match helpersByGroupId |> Map.tryFind groupId with                               // Step 2️⃣
+        match helpersByGroupId |> Map.tryFind groupId with                                      // Step 2️⃣
         | None ->
-            { Result = Some message; Status = HumanizationStatus.NotHumanized }
+            HumanizationOutcome.PartnerNotSupported
         | Some helper ->
-            match helper.DetermineSpecificity message with                               // Step 3️⃣
+            match helper.DetermineSpecificity message with                                      // Step 3️⃣
             | Some MessageSpecificity.AlreadyUserFriendly ->
-                { Result = Some message; Status = HumanizationStatus.AlreadyUserFriendly }
+                HumanizationOutcome.AlreadyUserFriendly
             | specificity ->
-                let context = { Message = message; Specificity = specificity }
-                match helper.DetermineRules context |> Rule.tryApplyFirst context with   // Step 4️⃣
-                | RuleNotEffective ->
-                    { Result = Some message; Status = HumanizationStatus.NotHumanized }
-                | RuleApplied humanizedMessage ->
-                    { Result = Some humanizedMessage; Status = HumanizationStatus.Humanized }
+                let context = { Context.Message = message; Specificity = specificity }
+                match helper.DetermineRules context |> applyEachRuleUntilSuccess context with   // Step 4️⃣
+                | MessageUnchanged ->
+                    HumanizationOutcome.NotHumanized message
+                | MessageHumanized humanizedMessage ->
+                    HumanizationOutcome.Humanized humanizedMessage
 ```
 
 The logic is correct, but it creeps rightward with every guard: four steps produce four levels of indentation. You have to reach the innermost branch to read the final outcome, and adding a fifth step pushes everything one level deeper.
@@ -93,7 +104,7 @@ Two cases:
 
 💡 **Note:** The names are a deliberate nod to C# keywords: `return` (early exit from a method) and `continue` (skip to the next iteration of a loop). `Return` exits the pipeline early with a final answer; `ContinueWith` passes the in-progress value into the next step.
 
-The type has **two independent type parameters**: `'inner` for the in-progress value passed between steps, and `'outcome` for the final result. These can be entirely different types, which is the case here: `'inner` is the pipeline's intermediate state, while `'outcome` is `HumanizationOutcome<Message option>`.
+The type has **two independent type parameters**: `'inner` for the in-progress value passed between steps, and `'outcome` for the final result. These can be entirely different types, which is the case here: `'inner` is the pipeline's intermediate state, while `'outcome` is `HumanizationOutcome`.
 
 ## The builder
 
@@ -154,29 +165,29 @@ This is what "short-circuiting" means: `Bind` acts as a gate at each step, and a
 With the type and builder in place, the pipeline rewrites as:
 
 ```fsharp
-let humanizeWithOutcome (message: Message option) (groupId: GroupId) : HumanizationOutcome<Message option> =
+let humanizeWithOutcome (optionalMessage: string option) (groupId: GroupId) : HumanizationOutcome =
     computation {
         let! message =                                                           // Step 1️⃣
-            match message with
-            | None     -> Return { Result = None; Status = HumanizationStatus.NoMessage }
-            | Some msg -> ContinueWith msg
+            match optionalMessage with
+            | None         -> Return HumanizationOutcome.NoMessage
+            | Some message -> ContinueWith message
 
         let! helper =                                                            // Step 2️⃣
             match helpersByGroupId |> Map.tryFind groupId with
-            | None        -> Return { Result = Some message; Status = HumanizationStatus.NotHumanized }
+            | None        -> Return HumanizationOutcome.PartnerNotSupported
             | Some helper -> ContinueWith helper
 
         let! context =                                                           // Step 3️⃣
             match helper.DetermineSpecificity message with
             | Some MessageSpecificity.AlreadyUserFriendly ->
-                Return { Result = Some message; Status = HumanizationStatus.AlreadyUserFriendly }
+                Return HumanizationOutcome.AlreadyUserFriendly
             | specificity ->
-                ContinueWith { Message = message; Specificity = specificity }
+                ContinueWith { Context.Message = message; Specificity = specificity }
 
         return!                                                                  // Step 4️⃣
-            match helper.DetermineRules context |> Rule.tryApplyFirst context with
-            | RuleNotEffective         -> Return { Result = Some message; Status = HumanizationStatus.NotHumanized }
-            | RuleApplied humanizedMessage -> Return { Result = Some humanizedMessage; Status = HumanizationStatus.Humanized }
+            match helper.DetermineRules context |> applyEachRuleUntilSuccess context with
+            | MessageUnchanged                  -> Return (HumanizationOutcome.NotHumanized message)
+            | MessageHumanized humanizedMessage -> Return (HumanizationOutcome.Humanized humanizedMessage)
     }
 ```
 
@@ -194,33 +205,33 @@ Compare with the nested-match version: the CE stays at a **constant indentation 
 The flat-looking `computation { … }` block is syntactic sugar. The compiler rewrites it into **nested calls** to the builder methods — exactly as described in the [series](https://dev.to/rdeneau/f-computation-expressions-4ge6): each `let! var = expr` becomes `Bind(expr, fun var -> rest)`, `return!` becomes `ReturnFrom`, and the whole block is wrapped in `Run` (there is no `Delay` member, so no `Delay` wrapping). Desugared, `humanizeWithOutcome` is:
 
 ```fsharp
-let humanizeWithOutcome (message: Message option) (groupId: GroupId) : HumanizationOutcome<Message option> =
+let humanizeWithOutcome (optionalMessage: string option) (groupId: GroupId) : HumanizationOutcome =
     computation.Run(
         // let! message = …                                                        // Step 1️⃣
         computation.Bind(
-            (match message with
-             | None     -> Return { Result = None; Status = HumanizationStatus.NoMessage }
-             | Some msg -> ContinueWith msg),
+            (match optionalMessage with
+             | None         -> Return HumanizationOutcome.NoMessage
+             | Some message -> ContinueWith message),
             fun message ->
                 // let! helper = …                                                 // Step 2️⃣
                 computation.Bind(
                     (match helpersByGroupId |> Map.tryFind groupId with
-                     | None        -> Return { Result = Some message; Status = HumanizationStatus.NotHumanized }
+                     | None        -> Return HumanizationOutcome.PartnerNotSupported
                      | Some helper -> ContinueWith helper),
                     fun helper ->
                         // let! context = …                                        // Step 3️⃣
                         computation.Bind(
                             (match helper.DetermineSpecificity message with
                              | Some MessageSpecificity.AlreadyUserFriendly ->
-                                 Return { Result = Some message; Status = HumanizationStatus.AlreadyUserFriendly }
+                                 Return HumanizationOutcome.AlreadyUserFriendly
                              | specificity ->
-                                 ContinueWith { Message = message; Specificity = specificity }),
+                                 ContinueWith { Context.Message = message; Specificity = specificity }),
                             fun context ->
                                 // return! …                                       // Step 4️⃣
                                 computation.ReturnFrom(
-                                    match helper.DetermineRules context |> Rule.tryApplyFirst context with
-                                    | RuleNotEffective             -> Return { Result = Some message; Status = HumanizationStatus.NotHumanized }
-                                    | RuleApplied humanizedMessage -> Return { Result = Some humanizedMessage; Status = HumanizationStatus.Humanized })))))
+                                    match helper.DetermineRules context |> applyEachRuleUntilSuccess context with
+                                    | MessageUnchanged                  -> Return (HumanizationOutcome.NotHumanized message)
+                                    | MessageHumanized humanizedMessage -> Return (HumanizationOutcome.Humanized humanizedMessage))))))
 ```
 
 ☝️ **Notes:**
@@ -228,9 +239,79 @@ let humanizeWithOutcome (message: Message option) (groupId: GroupId) : Humanizat
 * The nesting that the `computation { … }` block hid is now explicit: each `Bind` takes the step's right-hand side as its first argument and a **continuation** lambda as its second. The lambda's parameter is the name bound by `let!` (`message`, `helper`, `context`), and its body is "everything below that step until the `}`."
 * This nested shape is precisely what the CE saves you from writing — and, mirroring the original guards, it grows one level deeper per step. The sugar trades it for a constant-indentation block.
 * `Bind` short-circuits here, not by deferring work: if its first argument is `Return outcome`, the continuation lambda is **never invoked**, so the inner `match` expressions below it never run. A `Return` at Step 2️⃣, say, means Steps 3️⃣ and 4️⃣ are skipped entirely.
-* The outer `computation.Run(…)` is the finalizer: it unwraps the concluding `Return outcome` into the bare `'outcome` that `humanizeWithOutcome` returns — which is why the desugared expression, and the CE, has type `HumanizationOutcome<Message option>` rather than `Computation<_, _>`.
+* The outer `computation.Run(…)` is the finalizer: it unwraps the concluding `Return outcome` into the bare `'outcome` that `humanizeWithOutcome` returns — which is why the desugared expression, and the CE, has type `HumanizationOutcome` rather than `Computation<_, _>`.
 
 💡 **Tip:** You don't have to derive this by hand. As shown in the [first article of the series](https://dev.to/rdeneau/f-computation-expressions-4ge6), you can recover the desugared form mechanically with `Unquote`'s `<@ … @>` quotations.
+
+## Adding a final step: computing quality after the last bind
+
+The pipeline above always concludes at Step 4️⃣ via `return!` — there is nothing left to do once rules have run. Now suppose a new requirement arrives: report *how well* the humanization went. Specifically, if the message carried an error code but no rule targeted that code specifically (a generic fallback fired instead), that is *degraded* quality — a signal that a dedicated rule should be added.
+
+Two new types capture this:
+
+```fsharp
+type HumanizationQuality =
+    /// A rule specifically targeting the message matched (known ErrorCode, or content-based rule)
+    | OptimalQuality
+    /// Only a generic/fallback rule matched despite the message having an ErrorCode
+    /// — a specific rule targeting that ErrorCode should be added
+    | DegradedQuality
+```
+
+The `Humanized` outcome now carries the quality alongside the message:
+
+```fsharp
+type HumanizationOutcome =
+    | NoMessage
+    | PartnerNotSupported
+    | AlreadyUserFriendly
+    | NotHumanized of originalMessage: string
+    | Humanized of humanizedMessage: string * HumanizationQuality  // ← quality added
+```
+
+To compute quality, the pipeline needs to reach *after* Step 4️⃣ succeeds — which means Step 4️⃣ must no longer be the terminal step. The technique: instead of concluding with `return!`, bind the result with `let!` and `ContinueWith`, compute quality with a plain `let`, and conclude with `return`:
+
+```fsharp
+let humanizeWithOutcome (optionalMessage: string option) (groupId: GroupId) : HumanizationOutcome =
+    computation {
+        let! message =                                                           // Step 1️⃣
+            match optionalMessage with
+            | None -> Return HumanizationOutcome.NoMessage
+            | Some message -> ContinueWith message
+
+        let! helper =                                                            // Step 2️⃣
+            match helpersByGroupId |> Map.tryFind groupId with
+            | None -> Return HumanizationOutcome.PartnerNotSupported
+            | Some helper -> ContinueWith helper
+
+        let! context =                                                           // Step 3️⃣
+            match helper.DetermineSpecificity message with
+            | Some MessageSpecificity.AlreadyUserFriendly -> Return HumanizationOutcome.AlreadyUserFriendly
+            | specificity -> ContinueWith { Context.Message = message; Specificity = specificity }
+
+        let! humanizedMessage =                                                  // Step 4️⃣
+            match helper.DetermineRules context |> applyEachRuleUntilSuccess context with
+            | MessageUnchanged -> Return(HumanizationOutcome.NotHumanized message)
+            | MessageHumanized humanizedMessage -> ContinueWith humanizedMessage
+
+        let humanizationQuality =                                                // Step 5️⃣ (no short-circuit)
+            match context.ErrorCode with
+            | Some code when not (helper.HasSpecificRuleFor code) -> DegradedQuality
+            | _ -> OptimalQuality
+
+        return HumanizationOutcome.Humanized(humanizedMessage, humanizationQuality)
+    }
+```
+
+Two changes from the 4-step version:
+
+**Step 4️⃣: `return!` → `let!`**
+
+The step still short-circuits on failure — `MessageUnchanged` produces `Return (NotHumanized message)` and nothing below runs. The difference is the success branch: instead of `Return (Humanized humanizedMessage)`, it now uses `ContinueWith humanizedMessage`. This keeps the pipeline open: `humanizedMessage` is bound in scope, and the computation continues into Step 5️⃣, exactly as the earlier `let!` binds did.
+
+**Step 5️⃣: plain `let`, concluded by `return`**
+
+Quality computation requires no short-circuit — it always produces a value. It is a regular `let` binding, not `let!`. The final line is `return HumanizationOutcome.Humanized(humanizedMessage, humanizationQuality)`, which desugars to `computation.Return(…)`, then unwrapped by `Run`.
 
 ## `Computation` *vs* `Result` and railway-oriented programming
 
@@ -257,9 +338,9 @@ In ROP, short-circuiting signals *something failed*. Here, short-circuiting sign
 You *could* model this with `Result<'inner, 'outcome>` and `result {}`:
 
 ```fsharp
-let humanizeWithOutcome message groupId : HumanizationOutcome<Message option> =
+let humanizeWithOutcome optionalMessage groupId : HumanizationOutcome =
     result {
-        let! msg = message |> Option.toResult { Result = None; Status = HumanizationStatus.NoMessage }
+        let! message = optionalMessage |> Option.toResult HumanizationOutcome.NoMessage
         // …
     }
     |> Result.defaultWith id  // 👈 extract the `Error` branch — which is our actual outcome
@@ -303,4 +384,11 @@ For the mechanics behind `Bind`, `Return`, `Zero`, `Run`, and the wider theory o
 
 ## Updates
 
-* **2026-06-18** — Added the [*Desugaring: the real builder calls*](#desugaring-the-real-builder-calls) section, showing the nested `Bind`/`ReturnFrom`/`Run` calls that `computation { … }` compiles to.
+### 2026-06-19
+
+* Migrated the running example from a `{ Result; Status }` record to the `HumanizationOutcome` discriminated union, making invalid states unrepresentable: the record allowed contradictions such as `{ Result = Some msg; Status = NoMessage }`.
+* Added the [*Adding a final step: computing quality after the last bind*](#adding-a-final-step-computing-quality-after-the-last-bind) section, showing how to turn a terminal `return!` step into a `let!`/`ContinueWith` bind followed by a plain `return`.
+
+### 2026-06-18
+
+* Added the [*Desugaring: the real builder calls*](#desugaring-the-real-builder-calls) section, showing the nested `Bind`/`ReturnFrom`/`Run` calls that `computation { … }` compiles to.
