@@ -73,6 +73,8 @@ Two partial workarounds exist, but neither is satisfying here:
 
 So the nesting is structural: it is the direct consequence of expression-based semantics combined with destructuring bindings that must stay in scope.
 
+💡 **One approach does exist:** a continuation-passing CE with `Combine`/`Zero`/`Delay` support achieves literal `if cond then return x` guard clauses with no `else` branch. It trades a simple data type for a higher-order function. See [*A third way: a continuation monad for literal early return*](#a-third-way-a-continuation-monad-for-literal-early-return) below.
+
 💡 **Note:** This shape — a linear sequence of "if we have a definitive answer, return it; otherwise carry on with the in-progress value" steps — is exactly what a **short-circuiting monad** is designed for. See the [monad article in the series](https://dev.to/rdeneau/f-monadic-computation-expressions-4n0i) for the underlying theory; this article focuses on the real-world implementation.
 
 ## The `Computation` type
@@ -373,12 +375,121 @@ The trade-off: a custom type has no FsToolkit/FSharpPlus ecosystem (`traverse`, 
 
 💡 **Note:** The entire implementation fits in 36 lines including doc comments and the module-level `bind` helper. If the naming improves readability and `Run` provides a useful invariant, the overhead is negligible.
 
+## A third way: a continuation monad for literal early return
+
+[Borar](https://bsky.app/profile/borar.bsky.social) shared his [gist](https://gist.github.com/Savelenko/5e3f4b670b4d89a689d8713f1a73325c) that offers exactly the "early return" the earlier section says F# doesn't have — using a **continuation-passing-style (CPS) monad**.
+
+### The insight
+
+In the gist, each computation step is not a plain value but a **function that receives "the rest of the pipeline"** as an argument:
+
+```fsharp
+// Gist's core type: a computation is a function from "the rest" to the final async result
+type ContAsync<'r,'a> = ('a -> Async<'r>) -> Async<'r>
+```
+
+Short-circuiting then means **ignoring the rest**:
+
+```fsharp
+// `early`: ignore the continuation `_k`; just return the final answer immediately
+let early (a: 'a) : ContAsync<'a, _> = fun _k -> async { return a }
+```
+
+`Combine`/`Delay` — members the DU builder deliberately omits — and `Zero` are what make `if cond then return! early x` legal F# with no `else` branch.
+
+### A simplified, generic, synchronous version
+
+The gist hardcodes `Async`. Generalizing: make `'final` polymorphic and drop the async coupling. Rename `early` → `Return` and the monadic lift → `ContinueWith`, aligning with the DU CE's vocabulary:
+
+```fsharp
+/// A computation in CPS style. Receives `next` ("the rest") and yields the concluding `'final`.
+type Continuation<'final, 'a> = ('a -> 'final) -> 'final
+
+/// Short-circuit: ignore the rest and conclude with `answer`. (cf. the DU's `Return`)
+let Return (answer: 'final) : Continuation<'final, 'a> = fun _next -> answer
+
+/// Carry on: hand `value` to the rest of the pipeline. (cf. the DU's `ContinueWith`)
+let ContinueWith (value: 'a) : Continuation<'final, 'a> = fun next -> next value
+
+type ContinuationBuilder() =
+    member _.Bind(comp, f) : Continuation<'final, 'b> = fun next -> comp (fun a -> f a next)
+    member _.Return(answer: 'final) : Continuation<'final, 'a> = fun _next -> answer   // short-circuits ⚡
+    member _.ReturnFrom(comp) = comp
+    member _.Zero() : Continuation<'final, unit> = fun next -> next ()                 // if-no-else: carry on
+    member this.Combine(guard, rest) = this.Bind(guard, fun () -> rest)
+    member _.Delay(f) : Continuation<'final, 'a> = fun next -> f () next
+    member _.Run(comp: Continuation<'final, 'final>) : 'final = comp id                // finalize with identity
+
+let continuation = ContinuationBuilder()
+```
+
+Key points:
+
+* `builder.Return` **short-circuits** (`fun _next -> answer`) — the opposite of the gist, where `builder.Return` *continues* (`fun k -> k a`). This means the CE keyword `return x` is already the short-circuit; no separate `early` helper is needed.
+* `Zero()` returns `fun next -> next ()` — when a guard condition is *false*, execution carries on with `()`. `Combine(guard, rest)` wires this up: if `guard` continues, `rest` runs; if `guard` short-circuits, `rest` is skipped.
+* `Delay` defers the rest of the block into a closure so it is not evaluated when a guard fires.
+* `Run comp = comp id` finalizes by passing the identity function as the last continuation — the same philosophy as the DU CE's `Run`, and with a guaranteed type-safe result: no `failwith` needed (the type `Continuation<'final,'final>` already encodes that the pipeline must conclude).
+
+### Guard clauses with no `else`
+
+The payoff: boolean guards read like C#.
+
+```fsharp
+type ProcessOutcome = Skipped of string | Forbidden of string | Processed
+
+let processDingus lookUpDingus checkPolicy : ProcessOutcome =
+    continuation {
+        if not (lookUpDingus ()) then
+            return Skipped "dingus not found"   // 👈 no else!
+
+        if not (checkPolicy ()) then
+            return Forbidden "no access"        // 👈 no else!
+
+        return Processed
+    }
+```
+
+This is **impossible with the DU `computation {}`** — that builder has the `Zero` but lacks the `Combine`, so the compiler rejects `if` without `else` inside it.
+
+### Applying it to `humanizeWithOutcome`
+
+Because every humanization step **destructures a value** (`Some message`, `Some helper`, …) rather than testing a boolean, the if-no-else feature does not apply. The `continuation {}` version is *textually identical* to the `computation {}` version — only the builder name changes.
+
+### Recovering async
+
+`'final` is fully generic, so async is not lost. Set `'final = Async<'r>` and add one `Source` overload (o extension method) to `let!` bare async computations inline:
+
+```fsharp
+member _.Source(asyncComp: Async<'a>) : Continuation<Async<'r>, 'a> =
+    fun next -> async { let! a = asyncComp in return! next a }
+```
+
+`Run` then finalizes to `Async<'r>` — recovering the gist's `runContAsync`. The sync builder above is the general core; the async builder is one instantiation.
+
+### The three builders at a glance
+
+| Aspect                             | `computation {}` (DU)                    | `result {}` (FsToolkit)            | `continuation {}` (CPS)                    |
+| ---------------------------------- | ---------------------------------------- | ---------------------------------- | ------------------------------------------ |
+| Underlying type                    | 2-case DU `Computation<'inner,'outcome>` | `Result<'ok,'err>`                 | function `('a -> 'final) -> 'final`        |
+| Builder lines (approx.)            | ~10                                      | none (library-provided)            | ~10                                        |
+| Builder difficulty                 | first-order, transparent                 | —                                  | higher-order (CPS); harder to grok/debug   |
+| "carry on" / "short-circuit"       | `ContinueWith` / `Return`                | `Ok` / `Error`                     | `ContinueWith` / `Return` (ignores `next`) |
+| Short-circuit in CE                | `return!`/`return` of a DU value         | `Error x` match arm                | bare `return x`                            |
+| `if guard then …` with **no else** | ✗                                        | ✗                                  | ✓ (the C#-est form)                        |
+| Async / effects                    | ✗ (sync only)                            | needs `asyncResult {}`             | ✓ via `'final = Async<_>` + `Source`       |
+| CE return type                     | `'outcome` directly (unwrapped by `Run`) | `Result<_,_>` (caller must unwrap) | `'final` directly (unwrapped by `Run`)     |
+| Debuggability                      | easy (plain DU values)                   | easy                               | harder (closure chains, deeper stacks)     |
+
+For a **fixed linear pipeline whose steps bind and destructure values**, the DU `computation {}` is the sweet spot — minimal, transparent, easy to step through. Reach for the **continuation monad** when you need literal boolean guard clauses with no `else`, or want to interleave effects (async) without committing to a fixed wrapper type — accepting a more abstract builder. Use `result {}` when already in the `Result` ecosystem and the inverted polarity (`Error` = "our answer") is acceptable.
+
 ## Conclusion
 
 A custom `computation {}` CE can make a real production pipeline read as its domain narrative rather than a data-structure manipulation. The implementation here is minimal — one discriminated union, one builder — and it adds two things the standard `result {}` does not:
 
 * **Domain-meaningful names** (`ContinueWith`/`Return`) that communicate the computation's intent rather than a structural success/failure polarity.
 * **A finalizing** `Run` **method** that enforces the invariant that the pipeline must always reach a definitive answer, and unwraps that answer directly into the CE's return type.
+
+A third CE shape — the continuation monad — goes one step further: it enables literal `if cond then return x` guard clauses with no `else` branch, at the cost of a higher-order builder that is harder to debug. The [three-way comparison table](#the-three-builders-at-a-glance) captures when to reach for each.
 
 For the mechanics behind `Bind`, `Return`, `Zero`, `Run`, and the wider theory of monads and computation expressions, see the [F# Computation Expressions series](https://dev.to/rdeneau/f-computation-expressions-4ge6) — this article assumes familiarity with those concepts and focuses on the real-world application.
 
@@ -388,6 +499,7 @@ For the mechanics behind `Bind`, `Return`, `Zero`, `Run`, and the wider theory o
 
 * Migrated the running example from a `{ Result; Status }` record to the `HumanizationOutcome` discriminated union, making invalid states unrepresentable: the record allowed contradictions such as `{ Result = Some msg; Status = NoMessage }`.
 * Added the [*Adding a final step: computing quality after the last bind*](#adding-a-final-step-computing-quality-after-the-last-bind) section, showing how to turn a terminal `return!` step into a `let!`/`ContinueWith` bind followed by a plain `return`.
+* Added the [*A third way: a continuation monad for literal early return*](#a-third-way-a-continuation-monad-for-literal-early-return) section (thanks to [Borar](https://bsky.app/profile/borar.bsky.social/post/3molx4ff6ys2l)): a simplified, generic, synchronous continuation-passing CE that supports `if guard then return x` clauses with no `else`, plus a three-way comparison of the `computation {}`, `result {}`, and `continuation {}` builders.
 
 ### 2026-06-18
 
