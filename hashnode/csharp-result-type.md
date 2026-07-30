@@ -20,8 +20,10 @@ We did not start from a blank page. The initial design was inspired by [OneOf](h
 
 OneOf validates two ideas we kept:
 
-- a closed set of cases, consumed through an exhaustive `Match`;
-- failures as values rather than exceptions.
+*   a closed set of cases, consumed through an exhaustive `Match`;
+    
+*   failures as values rather than exceptions.
+    
 
 But we deliberately diverged from it. OneOf is a *general-purpose* union emulation: `OneOf<RoomEntity, Error>` says nothing about which case is the success and which is the failure; its members are named `T0` and `T1`, and every domain-specific nicety has to be rebuilt on top. A dedicated `Result<T>` gives us domain-meaningful names (`Ok`, `Error`, `Match(ok:, error:)`), a single error contract, and — crucially — room for the ergonomic API described below, which a generic union cannot offer.
 
@@ -71,8 +73,7 @@ What we lose compared to a native union is exhaustive `switch` expressions (the 
 
 When union types ship, our migration will be a handful of lines: the type *declaration* shrinks, and `Match` could give way to `switch` expressions. Everything else in this article — the actual design work — remains untouched.
 
-So no, the missing union types were not the challenge.
-The challenge starts now.
+So no, the missing union types were not the challenge. The challenge starts now.
 
 ## The real challenge: design for C#, don't port F#
 
@@ -80,7 +81,7 @@ A naive port of F#'s `Result<'ok, 'error>` to C# produces a type that is technic
 
 Our design goal, in one sentence:
 
-> **Flat code — no nested `if`/`switch`/`try` blocks — that still handles the Ok and Error cases exhaustively.**
+> **Flat code — no nested** `if`**/**`switch`**/**`try` **blocks — that still handles the Ok and Error cases exhaustively.**
 
 Readable, yet robust.
 
@@ -114,8 +115,7 @@ public sealed record BusinessError(string MessageTemplate, params object[] Args)
 
 ### Decision 2: implicit conversions as constructors
 
-F# has no implicit conversion operators — not because it couldn't, but as a deliberate language-design choice: favor the explicit, no hidden tricks, no compiler magic.
-That is a sound principle, and one worth applying in C# too — *except* when explicitness degenerates into heavy, noisy code. F# can afford to be explicit everywhere because it is a low-ceremony language by design; C# is not, so it compensates with features like implicit conversions — see Mark Seemann's [Zone of Ceremony](https://blog.ploeh.dk/2019/12/16/zone-of-ceremony/) to dig into this trade-off.
+F# has no implicit conversion operators — not because it couldn't, but as a deliberate language-design choice: favor the explicit, no hidden tricks, no compiler magic. That is a sound principle, and one worth applying in C# too — *except* when explicitness degenerates into heavy, noisy code. F# can afford to be explicit everywhere because it is a low-ceremony language by design; C# is not, so it compensates with features like implicit conversions — see Mark Seemann's [Zone of Ceremony](https://blog.ploeh.dk/2019/12/16/zone-of-ceremony/) to dig into this trade-off.
 
 So we leaned on a feature C# does have:
 
@@ -138,8 +138,7 @@ A method returning `Result<RoomEntity>` just returns the entity on the happy pat
 
 ☝️ A subtlety on the error side: the `Error<T>` case wraps an `IError`, yet the conversion is declared from `BusinessError`, the concrete type. That is not an oversight — C# forbids user-defined implicit conversions from an interface. So the shortcut targets the standard implementation, `BusinessError`, and any other `IError` implementation goes through the explicit `new Error<T>(error)`. In practice this is no constraint: `BusinessError` covers virtually every call site.
 
-💡 One conversion we added and then *removed*: `string → Error`. It was a trap: with a `Result<string>`, the success payload and the error are both strings, so the two implicit conversions collide — forcing call sites to be explicit in that one case only.
-A convenience that silently stops working for one payload type is unsound; better to drop it and build errors explicitly from `BusinessError` everywhere.
+💡 One conversion we added and then *removed*: `string → Error`. It was a trap: with a `Result<string>`, the success payload and the error are both strings, so the two implicit conversions collide — forcing call sites to be explicit in that one case only. A convenience that silently stops working for one payload type is unsound; better to drop it and build errors explicitly from `BusinessError` everywhere.
 
 ### Decision 3: name for C# readers, not for FP initiates
 
@@ -156,9 +155,12 @@ An F# port would expose `map`, `bind`, `iter`, `defaultValue`. Our C# colleagues
 
 Three naming stories worth telling:
 
-- `Visit` was initially named `Switch` (as in OneOf). We renamed it: `Switch` is too evocative of the language's `switch` statement and wrongly suggests exhaustiveness, while `Visit` — impure, every case optional, an omitted case is a silent no-op — is honest about what it does, and nods to a pattern every C# developer knows.
-- `Bind` exists, but it is `internal`. It is the building block behind the LINQ extensions (in the next section), not a call-site API. Exposing `Bind` publicly would have invited the nested-lambda style we wanted to avoid; the query syntax is strictly more readable.
-- `Ignore` is admittedly the least C#-speaking name of the list. It resonates most with F# developers, used to the `ignore` function that *explicitly* discards a value — something C# allows implicitly, but in a trap-prone way (a silently dropped return value). We kept it anyway: short, honest about its intent, and familiar to our mostly F # team.
+*   `Visit` was initially named `Switch` (as in OneOf). We renamed it: `Switch` is too evocative of the language's `switch` statement and wrongly suggests exhaustiveness, while `Visit` — impure, every case optional, an omitted case is a silent no-op — is honest about what it does, and nods to a pattern every C# developer knows.
+    
+*   `Bind` exists, but it is `internal`. It is the building block behind the LINQ extensions (in the next section), not a call-site API. Exposing `Bind` publicly would have invited the nested-lambda style we wanted to avoid; the query syntax is strictly more readable.
+    
+*   `Ignore` is admittedly the least C#-speaking name of the list. It resonates most with F# developers, used to the `ignore` function that *explicitly* discards a value — something C# allows implicitly, but in a trap-prone way (a silently dropped return value). We kept it anyway: short, honest about its intent, and familiar to our mostly F # team.
+    
 
 ### Decision 4: the Try-pattern bridge
 
@@ -194,8 +196,7 @@ if (result.ErrorMessage is not null)
 
 `Error` (the `IError`, or `null` on success) and `ErrorMessage` (its formatted message) make error propagation to a result of another type a one-liner: `new Error<TOther>(result.Error!)`.
 
-None of this exists in F#'s `Result` — none of it *needs* to exist there, because F# has `match` expressions.
-In C#, meeting developers where they are (guard clauses, Try-pattern, nullability analysis) is what makes the type actually get adopted rather than worked around.
+None of this exists in F#'s `Result` — none of it *needs* to exist there, because F# has `match` expressions. In C#, meeting developers where they are (guard clauses, Try-pattern, nullability analysis) is what makes the type actually get adopted rather than worked around.
 
 ### Decision 5: a non-generic `Result`, the `Task` way
 
@@ -218,9 +219,12 @@ public sealed record Result
 
 Design notes packed in those few lines:
 
-- **It is a thin facade over `Result<Unit>`**, not a duplicated implementation. `Unit` is a one-value singleton type (`Unit.Value`) that lets `void`-like operations flow through generic code; the internal `AsGeneric` property bridges back to the generic combinators, so the LINQ machinery below works on both types.
-- **The failure factory is named `Fail`, not `Error`**, simply because `Error` was already taken by the error-accessor property. Pragmatic naming beats symmetric naming.
-- The same implicit conversion applies: `Result failed = new BusinessError("Boom");`.
+*   **It is a thin facade over** `Result<Unit>`, not a duplicated implementation. `Unit` is a one-value singleton type (`Unit.Value`) that lets `void`\-like operations flow through generic code; the internal `AsGeneric` property bridges back to the generic combinators, so the LINQ machinery below works on both types.
+    
+*   **The failure factory is named** `Fail`**, not** `Error`, simply because `Error` was already taken by the error-accessor property. Pragmatic naming beats symmetric naming.
+    
+*   The same implicit conversion applies: `Result failed = new BusinessError("Boom");`.
+    
 
 ## Chaining without `let!`: LINQ query syntax
 
@@ -234,8 +238,7 @@ result {
 }
 ```
 
-Each `let!` unwraps a `Result`, short-circuiting the whole block on the first error. C# has no computation expressions — but it has something whose compiler treatment is surprisingly close: **LINQ query syntax**.
-`from x in source` desugars to `SelectMany` calls, and `SelectMany` is `Bind` wearing a .NET name. The key point — often overlooked — is that this desugaring is purely *pattern-based*: the compiler does not require `IEnumerable<T>` or any interface; it just looks for suitable `Select`/`SelectMany` methods on the source type, instance, or extension. Provide the right overloads, and query syntax becomes a `result { }` block:
+Each `let!` unwraps a `Result`, short-circuiting the whole block on the first error. C# has no computation expressions — but it has something whose compiler treatment is surprisingly close: **LINQ query syntax**. `from x in source` desugars to `SelectMany` calls, and `SelectMany` is `Bind` wearing a .NET name. The key point — often overlooked — is that this desugaring is purely *pattern-based*: the compiler does not require `IEnumerable<T>` or any interface; it just looks for suitable `Select`/`SelectMany` methods on the source type, instance, or extension. Provide the right overloads, and query syntax becomes a `result { }` block:
 
 ```csharp
 return await (
@@ -273,8 +276,56 @@ The non-generic overloads are where the `Result` / `Result<Unit>` facade pays of
 
 `Select` overloads (sync and async) support `select` and `let` clauses; they are the query-syntax counterpart of `Map`.
 
-☝️ This section is the strongest evidence for the article's thesis. A port would have stopped at `Bind` and asked callers to nest lambdas. Looking for the *C# feature that plays the role of* computation expressions — rather than the missing feature itself — produced something arguably more discoverable than the F# original: every C# developer has written a LINQ query.
-One nuance, though: few have written one over anything other than an `IEnumerable<T>`, or even know it is possible — hence the importance of explaining the pattern-based desugaring above, which is exactly why it works on `Result<T>` and `Task<Result<T>>`.
+☝️ This section is the strongest evidence for the article's thesis. A port would have stopped at `Bind` and asked callers to nest lambdas. Looking for the *C# feature that plays the role of* computation expressions — rather than the missing feature itself — produced something arguably more discoverable than the F# original: every C# developer has written a LINQ query. One nuance, though: few have written one over anything other than an `IEnumerable<T>`, or even know it is possible — hence the importance of explaining the pattern-based desugaring above, which is exactly why it works on `Result<T>` and `Task<Result<T>>`.
+
+### Side effects at the query boundary: `Tap`
+
+Query syntax deliberately offers no clause for side effects — a query builds a value, and its purity is part of its readability. Yet real call sites want to log the success. The first instinct is imperative: run the chain with `Map`, store the result, `Visit` it, return it.
+
+```csharp
+var result = (await CreateRate(hotelCode, rateDefinition))
+    .Map(rateCreated => rateCreated.Id);
+result.Visit(ok: rateId => _logger.LogInformation("Rate {RateId} created", rateId));
+return result;
+```
+
+A `Tap` extension — run a side effect on success, return the result unchanged — lets the side effect attach to the *query as a whole*:
+
+```csharp
+return await (
+        from rateCreated in CreateRate(hotelCode, rateDefinition)
+        select rateCreated.Id)
+    .TapAsync(ok: rateId => _logger.LogInformation("Rate {RateId} created", rateId));
+```
+
+What it buys:
+
+*   **More functional**: the effect no longer interrupts the flow — the expression stays a single pipeline, returnable as-is.
+    
+*   **Better decomposed**: build the query first, tap it after; no `Visit` wedged between a `Map` and a `return`.
+    
+*   **No intermediate variable**: nothing to name, nothing to mutate, nothing to accidentally reuse.
+    
+
+What it costs:
+
+*   **A less idiomatic name**: `Tap` comes from the FP world (Ramda, RxJS `tap`); a C# developer meets it for the first time. As with `Visit`, naming the argument — `TapAsync(ok: rateId => …)` — helps: it makes explicit that the lambda receives the value of the Ok case.
+    
+*   **A bit of formatting work**: the query must be parenthesized to be tapped, which produces the `await (⏎ from … ⏎ select …) ⏎ .TapAsync(…)` shape above — worth pinning down once in the team's formatting conventions.
+    
+
+Keeping effects at the query boundary is a recommendation, not a dogma. When an *intermediate* value used to build the query is worth logging, tapping it in place — or extracting a small log-then-map sub-function — can win on convenience and readability:
+
+```csharp
+public Task<Result<bool>> CheckGlobalFacilities(CancellationToken cancellationToken) =>
+    from response in GetGlobalFacilities(request, cancellationToken)
+    let differences = DetermineGlobalFacilitiesDifferences(response.FacilityMetas!.RoomFacilityMetas)
+    select differences.Tap(_logger.LogBusinessLog).ToList().Count == 0; // ToList() forces evaluation to log every difference
+
+public Task<Result<Dictionary<BookingFacilityId, StateEnum>>> GetFacilities(int hotelCode, int roomCode, CancellationToken cancellationToken) =>
+    from response in client.TrySendRequestAsync<GetRoomLevelFacilitiesResponse>(request, cancellationToken)
+    select MapFacilitiesAndLogUnknowns(request, response); // sub-function: log the unknown states, then map
+```
 
 ## Async ergonomics: killing the parenthesis dance
 
@@ -300,11 +351,12 @@ Small things, but call sites are read thousands of times; the design effort belo
 
 ## When (not) to use it
 
-A `Result` type is not a crusade against exceptions.
-Our rule of thumb splits along command/query lines:
+A `Result` type is not a crusade against exceptions. Our rule of thumb splits along command/query lines:
 
-- **Commands** (Create / Update / Activate / Remove) and lookups whose callers genuinely branch on the failure — retry, fallback, partial success — return `Result<T>` or `Result`. The failure is part of the business flow; the type makes it impossible to ignore.
-- **Queries** whose callers just need the value and cannot recover return the value directly and throw. Wrapping them in `Result` only to call `GetValueOrThrow` at every call site adds noise without adding safety.
+*   **Commands** (Create / Update / Activate / Remove) and lookups whose callers genuinely branch on the failure — retry, fallback, partial success — return `Result<T>` or `Result`. The failure is part of the business flow; the type makes it impossible to ignore.
+    
+*   **Queries** whose callers just need the value and cannot recover return the value directly and throw. Wrapping them in `Result` only to call `GetValueOrThrow` at every call site adds noise without adding safety.
+    
 
 `GetValueOrThrow` / `ThrowIfError` also serve two legitimate niches: boundaries that historically let an API failure propagate as an uncaught exception, and tests — unwrapping an expected success while failing loudly with the formatted business error message when the result is unexpectedly an error.
 
@@ -321,6 +373,8 @@ flowchart TD
 
     B -->|An output from both cases| M["Match[Async]()"]
     B -->|Side effects only| V["Visit()"]
+    B -->|"Side effect on success,<br/>result still needed after"| K["Tap[Async]()"]
+    K --> B
     B -->|Early exit on error| E{Value needed after?}
     E -->|Yes| T["ExtractValueOrError()"]
     E -->|No| P["Error / ErrorMessage"]
@@ -338,15 +392,23 @@ Whatever the shape, the selected consumer keeps the code flat while covering bot
 
 ## Takeaways
 
-1. **Porting an FP concept means translating idioms, not syntax.** The F# `Result` earns its keep through `match` expressions, inference, and computation expressions.
-   None of those exist in C#, but implicit conversions, the Try-pattern, nullability flow analysis, early exits, and LINQ query syntax do — and each carried a piece of the design.
-2. **The union-type gap is the least interesting part.**
-   An abstract record with two sealed cases and an abstract `Match` delivers a closed, exhaustively matched sum type today, in about twenty lines.
-3. **Specific beats generic.**
-   Starting from OneOf and diverging toward a dedicated `Result<T>` — one fixed error contract and domain-meaningful names — bought us the ergonomic API that a general-purpose union cannot provide.
-4. **Design effort belongs at the call site.**
-   `Bind` is internal; `ExtractValueOrError` argument order is documented; `Fail` is named around a property collision; async extensions exist to delete parentheses.  Each decision is small; together, they determine whether the type is adopted or worked around.
-5. **When C# union types ship, only our type declaration shrinks.**
-   The `Match`/`Visit`/Try-pattern/LINQ surface — the actual value of the design — stays exactly where it is.
+1.  **Porting an FP concept means translating idioms, not syntax.** The F# `Result` earns its keep through `match` expressions, inference, and computation expressions. None of those exist in C#, but implicit conversions, the Try-pattern, nullability flow analysis, early exits, and LINQ query syntax do — and each carried a piece of the design.
+    
+2.  **The union-type gap is the least interesting part.** An abstract record with two sealed cases and an abstract `Match` delivers a closed, exhaustively matched sum type today, in about twenty lines.
+    
+3.  **Specific beats generic.** Starting from OneOf and diverging toward a dedicated `Result<T>` — one fixed error contract and domain-meaningful names — bought us the ergonomic API that a general-purpose union cannot provide.
+    
+4.  **Design effort belongs at the call site.**`Bind` is internal; `ExtractValueOrError` argument order is documented; `Fail` is named around a property collision; async extensions exist to delete parentheses. Each decision is small; together, they determine whether the type is adopted or worked around.
+    
+5.  **When C# union types ship, only our type declaration shrinks.** The `Match`/`Visit`/Try-pattern/LINQ surface — the actual value of the design — stays exactly where it is.
+    
 
 If your team also straddles F# and C#, resist the flattering simplicity of a direct port. The best F# tribute your C# code can pay is to be good C#.
+
+* * *
+
+## History
+
+*   **2026-07-28** — Initial version.
+    
+*   **2026-07-30** — Added the "Side effects at the query boundary: `Tap`" section, documenting `(from … select …).TapAsync(…)` as the alternative to the imperative `Map` + `Visit` + return pattern.
